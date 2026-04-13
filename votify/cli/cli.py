@@ -297,8 +297,8 @@ async def main(config: CliConfig):
                     database.add(media_id, item.final_path)
                 await asyncio.sleep(config.wait_interval)
 
-        # ✨ IMPORTANT: Finalize playlists after URL is complete
-        # This writes M3U8 with ALL tracks (downloaded + skipped)
+        # ✨ CRITICAL: Finalize playlists after URL is complete
+        # M3U8 is ALWAYS created, even if ALL tracks are skipped
         logger.debug(f"Finalizing playlists for URL {url_index}/{len(urls)}")
         downloader.finalize_playlists()
 
