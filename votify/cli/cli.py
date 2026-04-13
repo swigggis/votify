@@ -229,9 +229,14 @@ async def main(config: CliConfig):
                 logger.error(url_progress + f" {str(e)}")
                 tracker.add_failed("unknown", url, str(e), download_index)
                 break
-            except VotifyMediaException as e:
-                # ✨ CRITICAL FIX: Handle exception from __anext__()
-                # At this point, item is still None because exception was thrown during fetch
+            except VotifyMediaFlatFilterException as e:
+                # Fallback: the flat-filter exception was yielded directly (i.e. the
+                # interface did NOT attach a `media` object to the exception, so
+                # get_download_item() could not convert it to a DownloadItem).
+                # In the normal case this branch is never reached because
+                # get_download_item() converts flat-filtered items into DownloadItems
+                # which then go through download() → VotifyMediaFileExists path,
+                # registering them with the playlist manager automatically.
                 media_title = "Unknown Title"
                 media_id = "unknown"
 
@@ -240,16 +245,26 @@ async def main(config: CliConfig):
                 if e.media_metadata and e.media_metadata.get("uri"):
                     media_id = e.media_metadata["uri"].split(":")[-1]
 
-                if isinstance(e, VotifyMediaFlatFilterException):
-                    tracker.add_skipped(media_id, media_title, "File already exists", download_index)
-                    logger.warning(
-                        download_queue_progress + f' Skipping "{media_title}": File already exists'
-                    )
-                else:
-                    tracker.add_skipped(media_id, media_title, str(e), download_index)
-                    logger.warning(
-                        download_queue_progress + f' Skipping "{media_title}": {str(e)}'
-                    )
+                logger.warning(
+                    download_queue_progress + f' Skipping "{media_title}": File already exists'
+                )
+                tracker.add_skipped(media_id, media_title, "File already exists", download_index)
+
+                download_index += 1
+                continue
+            except VotifyMediaException as e:
+                media_title = "Unknown Title"
+                media_id = "unknown"
+
+                if e.media_metadata and e.media_metadata.get("name"):
+                    media_title = e.media_metadata["name"]
+                if e.media_metadata and e.media_metadata.get("uri"):
+                    media_id = e.media_metadata["uri"].split(":")[-1]
+
+                tracker.add_skipped(media_id, media_title, str(e), download_index)
+                logger.warning(
+                    download_queue_progress + f' Skipping "{media_title}": {str(e)}'
+                )
 
                 download_index += 1
                 continue
@@ -301,7 +316,8 @@ async def main(config: CliConfig):
                     database.add(media_id, item.final_path)
                 await asyncio.sleep(config.wait_interval)
 
-        # ✨ CRITICAL: Finalize playlists after URL is complete
+        # Finalize playlists after every URL, regardless of how many tracks were
+        # skipped vs. downloaded. This is what writes (or recreates) the m3u8 file.
         logger.debug(f"Finalizing playlists for URL {url_index}/{len(urls)}")
         downloader.finalize_playlists()
 
