@@ -290,21 +290,22 @@ class SpotifyDownloader:
         - Only newly downloaded tracks
         Call this after processing all tracks in a URL.
         """
-        if self.save_playlist_file and self.playlist_manager.playlists:
-            logger.info("Creating M3U8 playlist files...")
-            try:
-                self.playlist_manager.write_all_playlists()
-                stats = self.playlist_manager.get_stats()
-                if stats['total_playlists'] > 0:
-                    logger.info(
-                        f"✓ Finalized {stats['total_playlists']} M3U8 file(s) "
-                        f"with {stats['total_tracks']} total track entries"
-                    )
-            except Exception as e:
-                logger.error(f"Error finalizing playlists: {e}")
-                raise
-            finally:
-                # Clear for next URL
-                self.playlist_manager.clear()
-        elif self.save_playlist_file:
-            logger.debug("No playlists to finalize")
+        if self.save_playlist_file:
+            if self.playlist_manager.playlists:
+                logger.info("Creating/Updating M3U8 playlist files...")
+                try:
+                    self.playlist_manager.write_all_playlists()
+                    stats = self.playlist_manager.get_stats()
+                    if stats['total_playlists'] > 0:
+                        logger.info(
+                            f"✓ Finalized {stats['total_playlists']} M3U8 file(s) "
+                            f"with {stats['total_tracks']} total track entries"
+                        )
+                except Exception as e:
+                    logger.error(f"Error finalizing playlists: {e}")
+                    raise
+                finally:
+                    # Clear for next URL
+                    self.playlist_manager.clear()
+            else:
+                logger.debug("No playlists registered for finalization")
