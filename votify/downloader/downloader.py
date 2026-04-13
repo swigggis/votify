@@ -57,11 +57,6 @@ class SpotifyDownloader:
         async for media in self.base.interface.get_media(url, auto_media_option):
             if isinstance(media, BaseException):
                 if isinstance(media, VotifyMediaFlatFilterException):
-                    # The flat-filter skipped this track (already in DB).
-                    # If the exception carries the media object, parse it into a
-                    # DownloadItem and yield it normally — download() will detect
-                    # the file already exists and skip the download while still
-                    # registering the track with the playlist manager.
                     flat_media = getattr(media, "media", None)
                     if flat_media is not None:
                         try:
@@ -78,11 +73,8 @@ class SpotifyDownloader:
                             else:
                                 yield media
                         except Exception:
-                            # If parsing fails for any reason, fall back to
-                            # yielding the exception so the caller can log it.
                             yield media
                         continue
-                # Re-yield all other exceptions as-is for the caller to handle.
                 yield media
                 continue
 
@@ -97,46 +89,14 @@ class SpotifyDownloader:
             }:
                 yield self.video.parse_item(media)
 
-    def register_skipped_playlist_track(self, item: DownloadItem) -> None:
-        """
-        Register a track with the playlist manager without downloading.
-        Used for tracks skipped by the flat-filter (already in DB) so their
-        paths still appear in the m3u8 even when no new download happens.
-        """
-        if not (item.playlist_file_path and item.final_path and self.save_playlist_file):
-            return
-
-        relative_path = self.base.get_playlist_relative_path(
-            item.playlist_file_path,
-            item.final_path,
-        )
-
-        total_tracks = None
-        if hasattr(item.media, 'playlist_tags') and item.media.playlist_tags:
-            total_tracks = getattr(item.media.playlist_tags, 'track_total', None)
-
-        self.playlist_manager.add_track(
-            playlist_file_path=item.playlist_file_path,
-            track_number=item.media.playlist_tags.track,
-            relative_path=relative_path,
-            total_tracks=total_tracks,
-        )
-
-        logger.debug(
-            f"Registered skipped track with playlist manager: "
-            f"track {item.media.playlist_tags.track}/{total_tracks or '?'}"
-        )
-
     async def download(self, item: DownloadItem) -> None:
         """
         Download media item with comprehensive error handling.
         ALWAYS registers track with playlist manager - even for skipped files.
-        Ensures M3U8 is created with ALL track types:
-        - Only downloaded files
-        - Only skipped files
-        - Mix of downloaded and skipped files
+        Writes M3U8 after EVERY track to ensure persistence on interruption.
         """
         file_already_existed = False
+        track_registered = False
 
         try:
             # Check if file already exists BEFORE any processing
@@ -145,14 +105,12 @@ class SpotifyDownloader:
                 logger.debug(f"File already exists: {item.final_path}")
 
             # CRITICAL: Register track with playlist manager FIRST
-            # This ensures M3U8 is created even if ALL tracks are skipped
             if item.playlist_file_path and item.final_path and self.save_playlist_file:
                 relative_path = self.base.get_playlist_relative_path(
                     item.playlist_file_path,
                     item.final_path,
                 )
 
-                # Get total tracks from playlist metadata if available
                 total_tracks = None
                 if hasattr(item.media, 'playlist_tags') and item.media.playlist_tags:
                     total_tracks = getattr(item.media.playlist_tags, 'track_total', None)
@@ -163,6 +121,7 @@ class SpotifyDownloader:
                     relative_path=relative_path,
                     total_tracks=total_tracks,
                 )
+                track_registered = True
 
                 track_status = "SKIPPED" if file_already_existed else "downloading"
                 logger.debug(
@@ -170,7 +129,7 @@ class SpotifyDownloader:
                     f"track {item.media.playlist_tags.track}/{total_tracks or '?'} ({track_status})"
                 )
 
-            # If file exists and we're not overwriting, skip download but track is already registered!
+            # If file exists and we're not overwriting, raise exception AFTER registration
             if file_already_existed:
                 raise VotifyMediaFileExists(item.final_path)
 
@@ -184,8 +143,16 @@ class SpotifyDownloader:
             await self._final_processing(item)
 
         finally:
+            # CRITICAL: Write M3U8 after EVERY track (downloaded or skipped)
+            # This ensures the playlist is updated incrementally, not just at the end
+            if track_registered and self.save_playlist_file and item.playlist_file_path:
+                try:
+                    self.playlist_manager.write_playlist(item.playlist_file_path)
+                    logger.debug(f"Updated M3U8: {Path(item.playlist_file_path).name}")
+                except Exception as e:
+                    logger.warning(f"Failed to update M3U8: {e}")
+
             if not self.skip_cleanup and not file_already_existed:
-                # Only cleanup if we actually attempted a download
                 self._cleanup_temp(item.uuid_)
 
     async def _download(self, item: DownloadItem) -> None:
@@ -276,14 +243,10 @@ class SpotifyDownloader:
             shutil.rmtree(temp_path, ignore_errors=True)
 
     async def _initial_processing(self, item: DownloadItem) -> None:
-        """
-        Process cover art and lyrics for new downloads.
-        Playlist registration is done in download() method.
-        """
+        """Process cover art and lyrics for new downloads."""
         if self.skip_processing:
             return
 
-        # Cover and lyrics only for new files or when overwriting
         if item.cover_path and self.save_cover_file and item.media.cover_url:
             cover_bytes = await self.base.get_cover_bytes(
                 item.media.cover_url,
@@ -341,22 +304,19 @@ class SpotifyDownloader:
 
     def finalize_playlists(self) -> None:
         """
-        Write all collected playlists to disk.
-        ALWAYS creates M3U8 files, even if:
-        - Only skipped tracks (all files already exist)
-        - Mix of downloaded and skipped tracks
-        - Only newly downloaded tracks
-        Call this after processing all tracks in a URL.
+        Write all collected playlists to disk (final pass).
+        This is called at the end of each URL to ensure everything is written.
+        Note: Individual tracks also trigger writes in download() method.
         """
         if self.save_playlist_file:
             if self.playlist_manager.playlists:
-                logger.info("Creating/Updating M3U8 playlist files...")
+                logger.info("Finalizing M3U8 playlist files...")
                 try:
                     self.playlist_manager.write_all_playlists()
                     stats = self.playlist_manager.get_stats()
                     if stats['total_playlists'] > 0:
                         logger.info(
-                            f"Finalized {stats['total_playlists']} M3U8 file(s) "
+                            f"✓ Finalized {stats['total_playlists']} M3U8 file(s) "
                             f"with {stats['total_tracks']} total track entries"
                         )
                 except Exception as e:
