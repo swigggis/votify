@@ -13,6 +13,7 @@ from .exceptions import (
     VotifyMediaFileExists,
     VotifySyncedLyricsOnly,
 )
+from .playlist_manager import PlaylistManager
 from .types import DownloadItem
 from .video import SpotifyVideoDownloader
 
@@ -43,6 +44,9 @@ class SpotifyDownloader:
         self.synced_lyrics_only = synced_lyrics_only
         self.skip_processing = skip_processing
         self.skip_cleanup = skip_cleanup
+        
+        # NEW: Playlist manager for proper playlist file generation
+        self.playlist_manager = PlaylistManager()
 
     async def get_download_item(
         self,
@@ -66,12 +70,58 @@ class SpotifyDownloader:
                 yield self.video.parse_item(media)
 
     async def download(self, item: DownloadItem) -> None:
+        """
+        Download media item with comprehensive error handling.
+        Playlist files are managed by PlaylistManager and written at the end.
+        """
+        file_already_existed = False
+
         try:
+            # Check if file already exists BEFORE any processing
+            if item.final_path and Path(item.final_path).exists() and not self.overwrite:
+                file_already_existed = True
+                logger.debug(f"File already exists: {item.final_path}")
+
+            # Register track with playlist manager (even for existing files)
+            if item.playlist_file_path and item.final_path and self.save_playlist_file:
+                relative_path = self.base.get_playlist_relative_path(
+                    item.playlist_file_path,
+                    item.final_path,
+                )
+                
+                # Get total tracks from playlist metadata if available
+                total_tracks = None
+                if hasattr(item.media, 'playlist_tags') and item.media.playlist_tags:
+                    total_tracks = getattr(item.media.playlist_tags, 'track_total', None)
+                
+                self.playlist_manager.add_track(
+                    playlist_file_path=item.playlist_file_path,
+                    track_number=item.media.playlist_tags.track,
+                    relative_path=relative_path,
+                    total_tracks=total_tracks,
+                )
+                
+                logger.debug(
+                    f"Registered with playlist manager: track {item.media.playlist_tags.track} "
+                    f"({'exists' if file_already_existed else 'will download'})"
+                )
+
+            # If file exists and we're not overwriting, skip download
+            if file_already_existed:
+                raise VotifyMediaFileExists(item.final_path)
+
+            # Continue with initial processing (cover, lyrics)
             await self._initial_processing(item)
+
+            # Download the actual media file
             await self._download(item)
+
+            # Final processing (move from temp to final location)
             await self._final_processing(item)
+
         finally:
-            if not self.skip_cleanup:
+            if not self.skip_cleanup and not file_already_existed:
+                # Only cleanup if we actually attempted a download
                 self._cleanup_temp(item.uuid_)
 
     async def _download(self, item: DownloadItem) -> None:
@@ -162,16 +212,14 @@ class SpotifyDownloader:
             shutil.rmtree(temp_path, ignore_errors=True)
 
     async def _initial_processing(self, item: DownloadItem) -> None:
+        """
+        Process cover art and lyrics for new downloads.
+        Playlist files are now managed by PlaylistManager.
+        """
         if self.skip_processing:
             return
 
-        if item.playlist_file_path and item.final_path and self.save_playlist_file:
-            self.base.update_playlist_file(
-                item.playlist_file_path,
-                item.final_path,
-                item.media.playlist_tags.track,
-            )
-
+        # Cover and lyrics only for new files or when overwriting
         if item.cover_path and self.save_cover_file and item.media.cover_url:
             cover_bytes = await self.base.get_cover_bytes(
                 item.media.cover_url,
@@ -226,3 +274,20 @@ class SpotifyDownloader:
 
         Path(final_path).parent.mkdir(parents=True, exist_ok=True)
         shutil.move(staged_path, final_path)
+    
+    def finalize_playlists(self) -> None:
+        """
+        Write all collected playlists to disk.
+        Call this after processing all tracks in a URL.
+        """
+        if self.save_playlist_file:
+            logger.info("Writing playlist files...")
+            self.playlist_manager.write_all_playlists()
+            stats = self.playlist_manager.get_stats()
+            if stats['total_playlists'] > 0:
+                logger.info(
+                    f"Finalized {stats['total_playlists']} playlist(s) "
+                    f"with {stats['total_tracks']} total tracks"
+                )
+            # Clear for next URL
+            self.playlist_manager.clear()
