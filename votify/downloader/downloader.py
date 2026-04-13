@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import AsyncGenerator
 
 from ..interface.enums import AutoMediaOption, MediaType
+from ..interface.exceptions import VotifyMediaFlatFilterException
 from .audio import SpotifyAudioDownloader
 from .base import SpotifyBaseDownloader
 from .constants import TEMP_PATH_TEMPLATE
@@ -16,7 +17,6 @@ from .exceptions import (
 from .playlist_manager import PlaylistManager
 from .types import DownloadItem
 from .video import SpotifyVideoDownloader
-from ..interface.exceptions import VotifyMediaFlatFilterException
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +49,44 @@ class SpotifyDownloader:
         # Playlist manager for proper playlist file generation
         self.playlist_manager = PlaylistManager()
 
+    def _download_item_from_flatfilter_exception(
+        self, exc: VotifyMediaFlatFilterException
+    ) -> DownloadItem | None:
+        """
+        Convert a flat-filter exception into a DownloadItem, if the exception
+        carries enough info (media + file_path). This is used for DB-skipped
+        playlist items so they still get written into M3U8.
+        """
+        flat_media = getattr(exc, "media", None)
+        file_path = getattr(exc, "file_path", None)
+
+        if flat_media is None or not file_path:
+            return None
+
+        # Build item with existing file path as final_path
+        item = DownloadItem(media=flat_media)
+        item.final_path = str(file_path)
+
+        # Ensure playlist file path exists if playlist tags exist
+        if getattr(flat_media, "playlist_tags", None):
+            try:
+                item.playlist_file_path = self.base.get_playlist_file_path(
+                    flat_media.playlist_tags
+                )
+            except Exception:
+                # Fallback: some implementations keep this on audio/video downloader
+                # but base should have it. If not, we leave it None.
+                item.playlist_file_path = None
+
+        # cover/lyrics paths are derived from final_path
+        try:
+            item.synced_lyrics_path = str(Path(item.final_path).with_suffix(".lrc"))
+            item.cover_path = str(Path(item.final_path).parent / "Cover.jpg")
+        except Exception:
+            pass
+
+        return item
+
     async def get_download_item(
         self,
         url: str | None = None,
@@ -56,32 +94,24 @@ class SpotifyDownloader:
     ) -> AsyncGenerator[DownloadItem | BaseException, None]:
         async for media in self.base.interface.get_media(url, auto_media_option):
             if isinstance(media, BaseException):
+                # SPECIAL CASE: flat-filtered items (already in DB) should still
+                # become DownloadItems so we can register them into the playlist.
                 if isinstance(media, VotifyMediaFlatFilterException):
-                    flat_media = getattr(media, "media", None)
-                    if flat_media is not None:
-                        try:
-                            if flat_media.tags.media_type in {
-                                MediaType.SONG,
-                                MediaType.PODCAST,
-                            }:
-                                yield self.audio.parse_item(flat_media)
-                            elif flat_media.tags.media_type in {
-                                MediaType.MUSIC_VIDEO,
-                                MediaType.PODCAST_VIDEO,
-                            }:
-                                yield self.video.parse_item(flat_media)
-                            else:
-                                yield media
-                        except Exception:
-                            yield media
+                    item = self._download_item_from_flatfilter_exception(media)
+                    if item is not None:
+                        yield item
                         continue
+
+                    # Legacy behavior: if exception doesn't carry media/file_path,
+                    # pass it upward.
+                    yield media
+                    continue
+
+                # Any other exception: pass through
                 yield media
                 continue
 
-            if media.tags.media_type in {
-                MediaType.SONG,
-                MediaType.PODCAST,
-            }:
+            if media.tags.media_type in {MediaType.SONG, MediaType.PODCAST}:
                 yield self.audio.parse_item(media)
             elif media.tags.media_type in {
                 MediaType.MUSIC_VIDEO,
@@ -112,10 +142,9 @@ class SpotifyDownloader:
                 )
 
                 total_tracks = None
-                if hasattr(item.media, 'playlist_tags') and item.media.playlist_tags:
-                    total_tracks = getattr(item.media.playlist_tags, 'track_total', None)
+                if hasattr(item.media, "playlist_tags") and item.media.playlist_tags:
+                    total_tracks = getattr(item.media.playlist_tags, "track_total", None)
 
-                # IMPORTANT: Register path for BOTH new downloads AND existing files
                 self.playlist_manager.add_track(
                     playlist_file_path=item.playlist_file_path,
                     track_number=item.media.playlist_tags.track,
@@ -133,13 +162,8 @@ class SpotifyDownloader:
             if file_already_existed:
                 raise VotifyMediaFileExists(item.final_path)
 
-            # Continue with initial processing (cover, lyrics)
             await self._initial_processing(item)
-
-            # Download the actual media file
             await self._download(item)
-
-            # Final processing (move from temp to final location)
             await self._final_processing(item)
 
         finally:
@@ -153,10 +177,7 @@ class SpotifyDownloader:
         if item.final_path and Path(item.final_path).exists() and not self.overwrite:
             raise VotifyMediaFileExists(item.final_path)
 
-        if item.media.tags.media_type in {
-            MediaType.SONG,
-            MediaType.PODCAST,
-        }:
+        if item.media.tags.media_type in {MediaType.SONG, MediaType.PODCAST}:
             if (
                 self.audio.download_mode == AudioDownloadMode.ARIA2C
                 and not self.base.aria2c_full_path
@@ -197,20 +218,15 @@ class SpotifyDownloader:
                 raise VotifyDependencyNotFound("mp4decrypt")
 
             await self.audio.download(item)
+
         elif item.media.tags.media_type in {
             MediaType.MUSIC_VIDEO,
             MediaType.PODCAST_VIDEO,
         }:
-            if (
-                self.video.remux_mode == VideoRemuxMode.FFMPEG
-                and not self.base.ffmpeg_full_path
-            ):
+            if self.video.remux_mode == VideoRemuxMode.FFMPEG and not self.base.ffmpeg_full_path:
                 raise VotifyDependencyNotFound("ffmpeg")
 
-            if (
-                self.video.remux_mode == VideoRemuxMode.MP4BOX
-                and not self.base.mp4box_full_path
-            ):
+            if self.video.remux_mode == VideoRemuxMode.MP4BOX and not self.base.mp4box_full_path:
                 raise VotifyDependencyNotFound("MP4Box")
 
             if item.media.decryption_key:
@@ -239,14 +255,9 @@ class SpotifyDownloader:
             return
 
         if item.cover_path and self.save_cover_file and item.media.cover_url:
-            cover_bytes = await self.base.get_cover_bytes(
-                item.media.cover_url,
-            )
+            cover_bytes = await self.base.get_cover_bytes(item.media.cover_url)
             if cover_bytes and (self.overwrite or not Path(item.cover_path).exists()):
-                self._write_cover_file(
-                    item.cover_path,
-                    cover_bytes,
-                )
+                self._write_cover_file(item.cover_path, cover_bytes)
 
         if (
             item.synced_lyrics_path
@@ -255,41 +266,29 @@ class SpotifyDownloader:
             and item.media.lyrics.synced
             and (self.overwrite or not Path(item.synced_lyrics_path).exists())
         ):
-            self._write_synced_lyrics_file(
-                item.synced_lyrics_path,
-                item.media.lyrics.synced,
-            )
+            self._write_synced_lyrics_file(item.synced_lyrics_path, item.media.lyrics.synced)
 
-    async def _final_processing(
-        self,
-        item: DownloadItem,
-    ) -> None:
+    async def _final_processing(self, item: DownloadItem) -> None:
         if self.skip_processing:
             return
 
         if item.staged_path and item.final_path and Path(item.staged_path).exists():
-            self._move_to_final_path(
-                item.staged_path,
-                item.final_path,
-            )
+            self._move_to_final_path(item.staged_path, item.final_path)
 
     def _write_cover_file(self, cover_path: str, cover_bytes: bytes) -> None:
         logger.debug(f"Writing cover: {cover_path}")
-
         Path(cover_path).parent.mkdir(parents=True, exist_ok=True)
         with open(cover_path, "wb") as f:
             f.write(cover_bytes)
 
     def _write_synced_lyrics_file(self, synced_lyrics_path: str, lyrics: str) -> None:
         logger.debug(f"Writing synced lyrics: {synced_lyrics_path}")
-
         Path(synced_lyrics_path).parent.mkdir(parents=True, exist_ok=True)
         with open(synced_lyrics_path, "w", encoding="utf-8") as f:
             f.write(lyrics)
 
     def _move_to_final_path(self, staged_path: str, final_path: str) -> None:
         logger.debug(f'Moving "{staged_path}" to "{final_path}"')
-
         Path(final_path).parent.mkdir(parents=True, exist_ok=True)
         shutil.move(staged_path, final_path)
 
@@ -304,7 +303,7 @@ class SpotifyDownloader:
                 try:
                     self.playlist_manager.write_all_playlists()
                     stats = self.playlist_manager.get_stats()
-                    if stats['total_playlists'] > 0:
+                    if stats["total_playlists"] > 0:
                         logger.info(
                             f"✓ Created {stats['total_playlists']} M3U8 file(s) "
                             f"with {stats['total_tracks']} track entries"
@@ -313,7 +312,6 @@ class SpotifyDownloader:
                     logger.error(f"Error creating playlists: {e}")
                     raise
                 finally:
-                    # Clear for next URL
                     self.playlist_manager.clear()
             else:
                 logger.debug("No playlists to create")
