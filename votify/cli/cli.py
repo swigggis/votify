@@ -230,6 +230,8 @@ async def main(config: CliConfig):
                 tracker.add_failed("unknown", url, str(e), download_index)
                 break
             except VotifyMediaException as e:
+                # ✨ CRITICAL FIX: Handle ALL VotifyMediaException here FIRST
+                # This includes VotifyMediaFlatFilterException (skipped files)
                 media_title = "Unknown Title"
                 media_id = "unknown"
 
@@ -239,8 +241,30 @@ async def main(config: CliConfig):
                     media_id = e.media_metadata["uri"].split(":")[-1]
 
                 if isinstance(e, VotifyMediaFlatFilterException):
-                    e = VotifyMediaFileExists(media_path=e.result)
                     tracker.add_skipped(media_id, media_title, "File already exists", download_index)
+                    
+                    # ✨ CRITICAL: Register skipped track with playlist manager
+                    if item and item.playlist_file_path and item.final_path and config.save_playlist_file:
+                        try:
+                            relative_path = base_downloader.get_playlist_relative_path(
+                                item.playlist_file_path,
+                                item.final_path,
+                            )
+                            total_tracks = None
+                            if hasattr(item.media, 'playlist_tags') and item.media.playlist_tags:
+                                total_tracks = getattr(item.media.playlist_tags, 'track_total', None)
+                            
+                            downloader.playlist_manager.add_track(
+                                playlist_file_path=item.playlist_file_path,
+                                track_number=item.media.playlist_tags.track,
+                                relative_path=relative_path,
+                                total_tracks=total_tracks,
+                            )
+                            logger.debug(
+                                f"Registered skipped track {item.media.playlist_tags.track} with playlist manager"
+                            )
+                        except Exception as ex:
+                            logger.warning(f"Could not register skipped track in playlist: {ex}")
                 else:
                     tracker.add_skipped(media_id, media_title, str(e), download_index)
 
@@ -270,49 +294,6 @@ async def main(config: CliConfig):
                 # Track successful download
                 final_path = str(item.final_path) if item.final_path else "unknown"
                 tracker.add_successful(media_id, media_title, final_path, download_index)
-
-            except VotifyMediaException as e:
-                # ✨ FIX: Handle skipped tracks from interface (VotifyMediaFlatFilterException)
-                media_title = "Unknown Title"
-                media_id = "unknown"
-
-                if e.media_metadata and e.media_metadata.get("name"):
-                    media_title = e.media_metadata["name"]
-                if e.media_metadata and e.media_metadata.get("uri"):
-                    media_id = e.media_metadata["uri"].split(":")[-1]
-
-                if isinstance(e, VotifyMediaFlatFilterException):
-                    tracker.add_skipped(media_id, media_title, "File already exists", download_index)
-                    
-                    # ✨ CRITICAL FIX: Register skipped track with playlist manager BEFORE skipping!
-                    # This ensures M3U8 includes skipped tracks
-                    if item and item.playlist_file_path and item.final_path and config.save_playlist_file:
-                        try:
-                            relative_path = base_downloader.get_playlist_relative_path(
-                                item.playlist_file_path,
-                                item.final_path,
-                            )
-                            total_tracks = None
-                            if hasattr(item.media, 'playlist_tags') and item.media.playlist_tags:
-                                total_tracks = getattr(item.media.playlist_tags, 'track_total', None)
-                            
-                            downloader.playlist_manager.add_track(
-                                playlist_file_path=item.playlist_file_path,
-                                track_number=item.media.playlist_tags.track,
-                                relative_path=relative_path,
-                                total_tracks=total_tracks,
-                            )
-                            logger.debug(
-                                f"Registered skipped track {item.media.playlist_tags.track} with playlist manager"
-                            )
-                        except Exception as ex:
-                            logger.warning(f"Could not register skipped track in playlist: {ex}")
-                else:
-                    tracker.add_skipped(media_id, media_title, str(e), download_index)
-
-                logger.warning(
-                    download_queue_progress + f' Skipping "{media_title}": {str(e)}'
-                )
 
             except Exception as e:
                 if isinstance(e, VotifyDownloaderException):
