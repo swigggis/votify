@@ -296,6 +296,31 @@ class SpotifyApi:
     def gid_to_media_id(gid: str) -> str:
         return base62.encode(int(gid, 16), charset=base62.CHARSET_INVERTED).zfill(22)
 
+    def _is_graphql_error(self, response_json: dict) -> bool:
+        """Check if response contains GraphQL errors that should be treated as failures"""
+        if not response_json:
+            return False
+        
+        errors = response_json.get("errors", [])
+        if not errors:
+            return False
+        
+        # Check if any error is a server error or data fetching exception
+        for error in errors:
+            message = error.get("message", "").lower()
+            extensions = error.get("extensions", {})
+            classification = extensions.get("classification", "")
+            
+            # GraphQL server errors or data fetching exceptions
+            if "server error" in message or classification == "DataFetchingException":
+                return True
+            
+            # Null data with errors is also a failure
+            if response_json.get("data") is None:
+                return True
+        
+        return False
+
     async def _pathfinder_request(
         self,
         operation_name: str,
@@ -319,11 +344,15 @@ class SpotifyApi:
         )
         response_json = safe_json(response)
 
-        if (
-            response.status_code != 200
-            or not response_json
-            or "errors" in response_json
-        ):
+        if response.status_code != 200 or not response_json:
+            raise VotifyRequestException(
+                name="Pathfinder",
+                response_status_code=response.status_code,
+                response_text=response.text,
+            )
+
+        # Check for GraphQL errors even with 200 status code
+        if self._is_graphql_error(response_json):
             raise VotifyRequestException(
                 name="Pathfinder",
                 response_status_code=response.status_code,
@@ -354,8 +383,9 @@ class SpotifyApi:
 
             return result
         except VotifyRequestException as e:
-            if e.response_status_code >= 500:
-                logger.warning(f"Track {track_id} request failed with server error {e.response_status_code}, skipping")
+            # Handle both HTTP 5xx errors and GraphQL errors
+            if e.response_status_code >= 500 or (e.response_status_code == 200 and "errors" in str(e)):
+                logger.warning(f"Track {track_id} request failed (status {e.response_status_code}), skipping")
                 return None
             raise
 
@@ -380,8 +410,8 @@ class SpotifyApi:
 
             return album
         except VotifyRequestException as e:
-            if e.response_status_code >= 500:
-                logger.warning(f"Album {album_id} request failed with server error {e.response_status_code}, skipping")
+            if e.response_status_code >= 500 or (e.response_status_code == 200 and "errors" in str(e)):
+                logger.warning(f"Album {album_id} request failed (status {e.response_status_code}), skipping")
                 return None
             raise
 
@@ -407,8 +437,8 @@ class SpotifyApi:
 
             return playlist
         except VotifyRequestException as e:
-            if e.response_status_code >= 500:
-                logger.warning(f"Playlist {playlist_id} request failed with server error {e.response_status_code}, skipping")
+            if e.response_status_code >= 500 or (e.response_status_code == 200 and "errors" in str(e)):
+                logger.warning(f"Playlist {playlist_id} request failed (status {e.response_status_code}), skipping")
                 return None
             raise
 
@@ -424,8 +454,8 @@ class SpotifyApi:
 
             return episode
         except VotifyRequestException as e:
-            if e.response_status_code >= 500:
-                logger.warning(f"Episode {episode_id} request failed with server error {e.response_status_code}, skipping")
+            if e.response_status_code >= 500 or (e.response_status_code == 200 and "errors" in str(e)):
+                logger.warning(f"Episode {episode_id} request failed (status {e.response_status_code}), skipping")
                 return None
             raise
 
@@ -450,8 +480,8 @@ class SpotifyApi:
 
             return show
         except VotifyRequestException as e:
-            if e.response_status_code >= 500:
-                logger.warning(f"Show {show_id} request failed with server error {e.response_status_code}, skipping")
+            if e.response_status_code >= 500 or (e.response_status_code == 200 and "errors" in str(e)):
+                logger.warning(f"Show {show_id} request failed (status {e.response_status_code}), skipping")
                 return None
             raise
 
@@ -470,8 +500,8 @@ class SpotifyApi:
 
             return artist_overview
         except VotifyRequestException as e:
-            if e.response_status_code >= 500:
-                logger.warning(f"Artist overview {artist_id} request failed with server error {e.response_status_code}, skipping")
+            if e.response_status_code >= 500 or (e.response_status_code == 200 and "errors" in str(e)):
+                logger.warning(f"Artist overview {artist_id} request failed (status {e.response_status_code}), skipping")
                 return None
             raise
 
@@ -498,8 +528,8 @@ class SpotifyApi:
 
             return result
         except VotifyRequestException as e:
-            if e.response_status_code >= 500:
-                logger.warning(f"Artist {type}s {artist_id} request failed with server error {e.response_status_code}, skipping")
+            if e.response_status_code >= 500 or (e.response_status_code == 200 and "errors" in str(e)):
+                logger.warning(f"Artist {type}s {artist_id} request failed (status {e.response_status_code}), skipping")
                 return None
             raise
 
@@ -565,8 +595,8 @@ class SpotifyApi:
 
             return artist_videos
         except VotifyRequestException as e:
-            if e.response_status_code >= 500:
-                logger.warning(f"Artist videos {artist_id} request failed with server error {e.response_status_code}, skipping")
+            if e.response_status_code >= 500 or (e.response_status_code == 200 and "errors" in str(e)):
+                logger.warning(f"Artist videos {artist_id} request failed (status {e.response_status_code}), skipping")
                 return None
             raise
 
@@ -589,8 +619,8 @@ class SpotifyApi:
 
             return library_tracks
         except VotifyRequestException as e:
-            if e.response_status_code >= 500:
-                logger.warning(f"Library tracks request failed with server error {e.response_status_code}, skipping")
+            if e.response_status_code >= 500 or (e.response_status_code == 200 and "errors" in str(e)):
+                logger.warning(f"Library tracks request failed (status {e.response_status_code}), skipping")
                 return None
             raise
 
