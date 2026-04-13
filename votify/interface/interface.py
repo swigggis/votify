@@ -1,4 +1,3 @@
-```python
 import asyncio
 import logging
 from typing import AsyncGenerator, Callable
@@ -714,4 +713,3 @@ class SpotifyInterface:
                 auto_media_option,
             ):
                 yield media
-```
