@@ -27,6 +27,15 @@ class SpotifyAudioDownloader(SpotifyBaseDownloader):
         self.download_mode = download_mode
         self.remux_mode = remux_mode
 
+    def gid_to_base62(self, gid_bytes: bytes) -> str:
+        alphabet = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+        val = int.from_bytes(gid_bytes, "big")
+        res = ""
+        while val > 0:
+            val, rem = divmod(val, 62)
+            res = alphabet[rem] + res
+        return res.zfill(22)
+
     async def download_stream(
         self,
         output_path: str,
