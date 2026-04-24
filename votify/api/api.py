@@ -296,6 +296,31 @@ class SpotifyApi:
     def gid_to_media_id(gid: str) -> str:
         return base62.encode(int(gid, 16), charset=base62.CHARSET_INVERTED).zfill(22)
 
+    def _is_graphql_error(self, response_json: dict) -> bool:
+        """Check if response contains GraphQL errors that should be treated as failures"""
+        if not response_json:
+            return False
+        
+        errors = response_json.get("errors", [])
+        if not errors:
+            return False
+        
+        # Check if any error is a server error or data fetching exception
+        for error in errors:
+            message = error.get("message", "").lower()
+            extensions = error.get("extensions", {})
+            classification = extensions.get("classification", "")
+            
+            # GraphQL server errors or data fetching exceptions
+            if "server error" in message or classification == "DataFetchingException":
+                return True
+            
+            # Null data with errors is also a failure
+            if response_json.get("data") is None:
+                return True
+        
+        return False
+
     async def _pathfinder_request(
         self,
         operation_name: str,
@@ -319,11 +344,15 @@ class SpotifyApi:
         )
         response_json = safe_json(response)
 
-        if (
-            response.status_code != 200
-            or not response_json
-            or "errors" in response_json
-        ):
+        if response.status_code != 200 or not response_json:
+            raise VotifyRequestException(
+                name="Pathfinder",
+                response_status_code=response.status_code,
+                response_text=response.text,
+            )
+
+        # Check for GraphQL errors even with 200 status code
+        if self._is_graphql_error(response_json):
             raise VotifyRequestException(
                 name="Pathfinder",
                 response_status_code=response.status_code,
@@ -343,15 +372,22 @@ class SpotifyApi:
         return user_profile
 
     async def get_track(self, track_id: str) -> dict:
-        result = await self._pathfinder_request(
-            operation_name="getTrack",
-            persisted_query_hash="612585ae06ba435ad26369870deaae23b5c8800a256cd8a57e08eddc25a37294",
-            variables={"uri": f"spotify:track:{track_id}"},
-        )
+        try:
+            result = await self._pathfinder_request(
+                operation_name="getTrack",
+                persisted_query_hash="612585ae06ba435ad26369870deaae23b5c8800a256cd8a57e08eddc25a37294",
+                variables={"uri": f"spotify:track:{track_id}"},
+            )
 
-        logger.debug(f"Received track: {result}")
+            logger.debug(f"Received track: {result}")
 
-        return result
+            return result
+        except VotifyRequestException as e:
+            # Handle both HTTP 5xx errors and GraphQL errors
+            if e.response_status_code >= 500 or (e.response_status_code == 200 and "errors" in str(e)):
+                logger.warning(f"Track {track_id} request failed (status {e.response_status_code}), skipping")
+                return None
+            raise
 
     async def get_album(
         self,
@@ -359,19 +395,25 @@ class SpotifyApi:
         offset: int = 0,
         limit: int = 300,
     ) -> dict:
-        album = await self._pathfinder_request(
-            operation_name="getAlbum",
-            persisted_query_hash="b9bfabef66ed756e5e13f68a942deb60bd4125ec1f1be8cc42769dc0259b4b10",
-            variables={
-                "uri": f"spotify:album:{album_id}",
-                "offset": offset,
-                "limit": limit,
-            },
-        )
+        try:
+            album = await self._pathfinder_request(
+                operation_name="getAlbum",
+                persisted_query_hash="b9bfabef66ed756e5e13f68a942deb60bd4125ec1f1be8cc42769dc0259b4b10",
+                variables={
+                    "uri": f"spotify:album:{album_id}",
+                    "offset": offset,
+                    "limit": limit,
+                },
+            )
 
-        logger.debug(f"Received album: {album}")
+            logger.debug(f"Received album: {album}")
 
-        return album
+            return album
+        except VotifyRequestException as e:
+            if e.response_status_code >= 500 or (e.response_status_code == 200 and "errors" in str(e)):
+                logger.warning(f"Album {album_id} request failed (status {e.response_status_code}), skipping")
+                return None
+            raise
 
     async def get_playlist(
         self,
@@ -379,31 +421,43 @@ class SpotifyApi:
         offset: int = 0,
         limit: int = 300,
     ) -> dict:
-        playlist = await self._pathfinder_request(
-            operation_name="fetchPlaylist",
-            persisted_query_hash="bb67e0af06e8d6f52b531f97468ee4acd44cd0f82b988e15c2ea47b1148efc77",
-            variables={
-                "uri": f"spotify:playlist:{playlist_id}",
-                "offset": offset,
-                "limit": limit,
-                "enableWatchFeedEntrypoint": True,
-            },
-        )
+        try:
+            playlist = await self._pathfinder_request(
+                operation_name="fetchPlaylist",
+                persisted_query_hash="bb67e0af06e8d6f52b531f97468ee4acd44cd0f82b988e15c2ea47b1148efc77",
+                variables={
+                    "uri": f"spotify:playlist:{playlist_id}",
+                    "offset": offset,
+                    "limit": limit,
+                    "enableWatchFeedEntrypoint": True,
+                },
+            )
 
-        logger.debug(f"Received playlist: {playlist}")
+            logger.debug(f"Received playlist: {playlist}")
 
-        return playlist
+            return playlist
+        except VotifyRequestException as e:
+            if e.response_status_code >= 500 or (e.response_status_code == 200 and "errors" in str(e)):
+                logger.warning(f"Playlist {playlist_id} request failed (status {e.response_status_code}), skipping")
+                return None
+            raise
 
     async def get_episode(self, episode_id: str) -> dict:
-        episode = await self._pathfinder_request(
-            operation_name="getEpisodeOrChapter",
-            persisted_query_hash="8a62dbdeb7bd79605d7d68b01bcdf83f08bc6c6287ee1665ba012c748a4cf1f3",
-            variables={"uri": f"spotify:episode:{episode_id}"},
-        )
+        try:
+            episode = await self._pathfinder_request(
+                operation_name="getEpisodeOrChapter",
+                persisted_query_hash="8a62dbdeb7bd79605d7d68b01bcdf83f08bc6c6287ee1665ba012c748a4cf1f3",
+                variables={"uri": f"spotify:episode:{episode_id}"},
+            )
 
-        logger.debug(f"Received episode: {episode}")
+            logger.debug(f"Received episode: {episode}")
 
-        return episode
+            return episode
+        except VotifyRequestException as e:
+            if e.response_status_code >= 500 or (e.response_status_code == 200 and "errors" in str(e)):
+                logger.warning(f"Episode {episode_id} request failed (status {e.response_status_code}), skipping")
+                return None
+            raise
 
     async def get_show(
         self,
@@ -411,33 +465,45 @@ class SpotifyApi:
         offset: int = 0,
         limit: int = 300,
     ) -> dict:
-        show = await self._pathfinder_request(
-            operation_name="queryPodcastEpisodes",
-            persisted_query_hash="8e2826c5993383566cc08bf9f5d3301b69513c3f6acb8d706286855e57bf44b2",
-            variables={
-                "uri": f"spotify:show:{show_id}",
-                "offset": offset,
-                "limit": limit,
-            },
-        )
+        try:
+            show = await self._pathfinder_request(
+                operation_name="queryPodcastEpisodes",
+                persisted_query_hash="8e2826c5993383566cc08bf9f5d3301b69513c3f6acb8d706286855e57bf44b2",
+                variables={
+                    "uri": f"spotify:show:{show_id}",
+                    "offset": offset,
+                    "limit": limit,
+                },
+            )
 
-        logger.debug(f"Received show: {show}")
+            logger.debug(f"Received show: {show}")
 
-        return show
+            return show
+        except VotifyRequestException as e:
+            if e.response_status_code >= 500 or (e.response_status_code == 200 and "errors" in str(e)):
+                logger.warning(f"Show {show_id} request failed (status {e.response_status_code}), skipping")
+                return None
+            raise
 
     async def get_artist_overview(self, artist_id: str) -> dict:
-        artist_overview = await self._pathfinder_request(
-            operation_name="queryArtistOverview",
-            persisted_query_hash="5b9e64f43843fa3a9b6a98543600299b0a2cbbbccfdcdcef2402eb9c1017ca4c",
-            variables={
-                "uri": f"spotify:artist:{artist_id}",
-                "preReleaseV2": False,
-            },
-        )
+        try:
+            artist_overview = await self._pathfinder_request(
+                operation_name="queryArtistOverview",
+                persisted_query_hash="5b9e64f43843fa3a9b6a98543600299b0a2cbbbccfdcdcef2402eb9c1017ca4c",
+                variables={
+                    "uri": f"spotify:artist:{artist_id}",
+                    "preReleaseV2": False,
+                },
+            )
 
-        logger.debug(f"Received artist overview: {artist_overview}")
+            logger.debug(f"Received artist overview: {artist_overview}")
 
-        return artist_overview
+            return artist_overview
+        except VotifyRequestException as e:
+            if e.response_status_code >= 500 or (e.response_status_code == 200 and "errors" in str(e)):
+                logger.warning(f"Artist overview {artist_id} request failed (status {e.response_status_code}), skipping")
+                return None
+            raise
 
     async def _get_artist_discography(
         self,
@@ -446,20 +512,26 @@ class SpotifyApi:
         offeset: int,
         limit: int,
     ) -> dict:
-        result = await self._pathfinder_request(
-            operation_name=f"queryArtistDiscography{type.capitalize()}s",
-            persisted_query_hash="5e07d323febb57b4a56a42abbf781490e58764aa45feb6e3dc0591564fc56599",
-            variables={
-                "uri": f"spotify:artist:{artist_id}",
-                "offset": offeset,
-                "limit": limit,
-                "order": "DATE_DESC",
-            },
-        )
+        try:
+            result = await self._pathfinder_request(
+                operation_name=f"queryArtistDiscography{type.capitalize()}s",
+                persisted_query_hash="5e07d323febb57b4a56a42abbf781490e58764aa45feb6e3dc0591564fc56599",
+                variables={
+                    "uri": f"spotify:artist:{artist_id}",
+                    "offset": offeset,
+                    "limit": limit,
+                    "order": "DATE_DESC",
+                },
+            )
 
-        logger.debug(f"Received artist {type}s: {result}")
+            logger.debug(f"Received artist {type}s: {result}")
 
-        return result
+            return result
+        except VotifyRequestException as e:
+            if e.response_status_code >= 500 or (e.response_status_code == 200 and "errors" in str(e)):
+                logger.warning(f"Artist {type}s {artist_id} request failed (status {e.response_status_code}), skipping")
+                return None
+            raise
 
     async def get_artist_albums(
         self,
@@ -506,39 +578,51 @@ class SpotifyApi:
         offset: int = 0,
         limit: int = 300,
     ) -> dict:
-        artist_videos = await self._pathfinder_request(
-            operation_name="queryArtistRelatedVideos",
-            persisted_query_hash="8958042d3dd127ec7882a7117fafa4df21af27ff1560af51e55061e8451de67b",
-            variables={
-                "uri": f"spotify:artist:{artist_id}",
-                "showMapped": True,
-                "showUnmapped": True,
-                "offset": offset,
-                "limit": limit,
-            },
-        )
+        try:
+            artist_videos = await self._pathfinder_request(
+                operation_name="queryArtistRelatedVideos",
+                persisted_query_hash="8958042d3dd127ec7882a7117fafa4df21af27ff1560af51e55061e8451de67b",
+                variables={
+                    "uri": f"spotify:artist:{artist_id}",
+                    "showMapped": True,
+                    "showUnmapped": True,
+                    "offset": offset,
+                    "limit": limit,
+                },
+            )
 
-        logger.debug(f"Received artist videos: {artist_videos}")
+            logger.debug(f"Received artist videos: {artist_videos}")
 
-        return artist_videos
+            return artist_videos
+        except VotifyRequestException as e:
+            if e.response_status_code >= 500 or (e.response_status_code == 200 and "errors" in str(e)):
+                logger.warning(f"Artist videos {artist_id} request failed (status {e.response_status_code}), skipping")
+                return None
+            raise
 
     async def get_library_tracks(
         self,
         offset: int = 0,
         limit: int = 300,
     ) -> dict:
-        library_tracks = await self._pathfinder_request(
-            operation_name="fetchLibraryTracks",
-            persisted_query_hash="087278b20b743578a6262c2b0b4bcd20d879c503cc359a2285baf083ef944240",
-            variables={
-                "offset": offset,
-                "limit": limit,
-            },
-        )
+        try:
+            library_tracks = await self._pathfinder_request(
+                operation_name="fetchLibraryTracks",
+                persisted_query_hash="087278b20b743578a6262c2b0b4bcd20d879c503cc359a2285baf083ef944240",
+                variables={
+                    "offset": offset,
+                    "limit": limit,
+                },
+            )
 
-        logger.debug(f"Received library tracks: {library_tracks}")
+            logger.debug(f"Received library tracks: {library_tracks}")
 
-        return library_tracks
+            return library_tracks
+        except VotifyRequestException as e:
+            if e.response_status_code >= 500 or (e.response_status_code == 200 and "errors" in str(e)):
+                logger.warning(f"Library tracks request failed (status {e.response_status_code}), skipping")
+                return None
+            raise
 
     async def get_video_manifest(
         self,

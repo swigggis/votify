@@ -1,6 +1,6 @@
 [project]
 name = "votify"
-version = "1.9.8"
+version = "1.9.6"
 description = "A command-line app for downloading songs, podcasts and videos from Spotify."
 readme = "README.md"
 license = "MIT"
@@ -18,7 +18,7 @@ dependencies = [
     "pybase62>=1.0.0",
     "pycryptodome>=3.23.0",
     "pywidevine>=1.9.0",
-    "unplayplay>=0.0.2",
+    "unplayplay>=0.0.1",
     "yt-dlp>=2026.2.4",
 ]
 

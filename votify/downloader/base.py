@@ -227,6 +227,10 @@ class SpotifyBaseDownloader:
         final_path: str,
         playlist_track: int,
     ) -> None:
+        """
+        DEPRECATED: This method is kept for backwards compatibility.
+        Use PlaylistManager instead for proper playlist file generation.
+        """
         playlist_file_path_obj = Path(playlist_file_path)
         final_path_obj = Path(final_path)
         output_dir_obj = Path(self.output_path)
@@ -256,6 +260,35 @@ class SpotifyBaseDownloader:
         logger.debug(
             f"Updated playlist file '{playlist_file_path}' with track {playlist_track}: {final_path_relative.as_posix()}"
         )
+
+    def get_playlist_relative_path(
+        self,
+        playlist_file_path: str,
+        final_path: str,
+    ) -> str:
+        """
+        Calculate relative path from playlist file to media file.
+        
+        Args:
+            playlist_file_path: Full path to .m3u8 file
+            final_path: Full path to media file
+            
+        Returns:
+            Relative path string (POSIX format with forward slashes)
+        """
+        playlist_file_path_obj = Path(playlist_file_path)
+        final_path_obj = Path(final_path)
+        output_dir_obj = Path(self.output_path)
+
+        playlist_file_path_parent_parts_len = len(playlist_file_path_obj.parent.parts)
+        output_path_parts_len = len(output_dir_obj.parts)
+
+        final_path_relative = Path(
+            ("../" * (playlist_file_path_parent_parts_len - output_path_parts_len)),
+            *final_path_obj.parts[output_path_parts_len:],
+        )
+        
+        return final_path_relative.as_posix()
 
     def get_temp_path(
         self,

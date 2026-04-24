@@ -33,8 +33,9 @@ class SpotifyEpisodeVideoInterface(SpotifyVideoInterface):
                 episode_data["podcastV2"]["data"]["uri"].split(":")[-1]
             )
 
-        media = SpotifyMedia(episode_data["uri"].split(":")[-1], episode_data)
+        media = SpotifyMedia(episode_data["uri"].split(":")[-1])
 
+        media.media_metadata = episode_data
         media.show_metadata = show_data
 
         media.tags = await SpotifyEpisodeInterface.parse_tags(

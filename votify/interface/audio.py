@@ -321,7 +321,7 @@ class SpotifyAudioInterface(SpotifyBaseInterface):
 
         request = PlayPlayLicenseRequest(
             version=5,
-            token=PLAYPLAY_TOKEN,
+            token=PLAYPLAY_TOKEN.VALUE,
             interactivity=Interactivity.INTERACTIVE,
             content_type=ContentType.AUDIO_TRACK,
         )

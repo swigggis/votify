@@ -50,8 +50,9 @@ class SpotifySongInterface(SpotifyAudioInterface):
                     track_data["albumOfTrack"]["uri"].split(":")[-1]
                 )
 
-        media = SpotifyMedia(track_data["uri"].split(":")[-1], track_data)
+        media = SpotifyMedia(track_data["uri"].split(":")[-1])
 
+        media.media_metadata = track_data
         media.album_metadata = album_data
         media.lyrics = await self.get_lyrics(media.media_id)
         media.tags = await self.parse_tags(
@@ -109,11 +110,10 @@ class SpotifySongInterface(SpotifyAudioInterface):
     ) -> MediaTags:
         release_date = album_data["date"]
 
-        (composer, producer), (album_artist, artist, isrc, label), upc = (
+        (composer, producer), (album_artist, artist, isrc, label) = (
             await asyncio.gather(
                 self._get_composer_producer(track_data["uri"].split(":")[-1]),
                 self._get_isrc_label(track_data["uri"].split(":")[-1]),
-                self._get_upc(album_data["uri"].split(":")[-1]),
             )
         )
 
@@ -145,7 +145,6 @@ class SpotifySongInterface(SpotifyAudioInterface):
             rating=rating,
             track=track_data["trackNumber"],
             track_total=track_total,
-            upc=upc,
             url=f"https://open.spotify.com/track/{track_data['uri'].split(':')[-1]}",
         )
 
@@ -260,20 +259,3 @@ class SpotifySongInterface(SpotifyAudioInterface):
             synced="\n".join(synced_lines) if synced_lines else None,
             unsynced="\n".join(unsynced_lines) + "\n" if unsynced_lines else None,
         )
-
-    async def _get_upc(
-        self,
-        album_id: str,
-    ) -> str | None:
-        album_gid = await self.api.get_gid_metadata(album_id, "album")
-
-        upc = next(
-            (
-                external_id["id"]
-                for external_id in album_gid.get("external_id", [])
-                if external_id["type"] == "upc"
-            ),
-            None,
-        )
-
-        return upc
